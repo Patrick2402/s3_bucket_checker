@@ -19,7 +19,7 @@ A simple Python script to analyze S3 buckets for security best practices and gen
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.13+
 - AWS CLI configured with appropriate permissions
 - Required Python packages:
   ```
