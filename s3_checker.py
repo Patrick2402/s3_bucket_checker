@@ -177,6 +177,7 @@ def check_s3_bucket_policy(s3_client, bucket_name):
         # Analyze policy for security
         has_public_access = False
         has_secure_transport = False
+        has_wildcard_principal = False  # Nowa flaga
         
         for statement in policy_json.get('Statement', []):
             principal = statement.get('Principal', {})
@@ -185,6 +186,15 @@ def check_s3_bucket_policy(s3_client, bucket_name):
             # Check for public access
             if principal == '*' or principal.get('AWS') == '*' and effect == 'Allow':
                 has_public_access = True
+            
+            # Check for wildcard principal (new)
+            if principal == '*' or (isinstance(principal, dict) and principal.get('AWS') == '*'):
+                has_wildcard_principal = True
+            elif isinstance(principal, dict) and isinstance(principal.get('AWS'), list):
+                for aws_principal in principal.get('AWS'):
+                    if aws_principal == '*':
+                        has_wildcard_principal = True
+                        break
             
             # Check for secure transport requirement
             if effect == 'Deny' and 'Condition' in statement:
@@ -197,6 +207,7 @@ def check_s3_bucket_policy(s3_client, bucket_name):
             'has_policy': True,
             'has_public_access': has_public_access,
             'has_secure_transport': has_secure_transport,
+            'has_wildcard_principal': has_wildcard_principal,  # Nowe pole
             'policy': policy_json
         }
     except ClientError as e:
@@ -205,6 +216,7 @@ def check_s3_bucket_policy(s3_client, bucket_name):
                 'has_policy': False,
                 'has_public_access': False,
                 'has_secure_transport': False,
+                'has_wildcard_principal': False,  # Nowe pole
                 'policy': None
             }
         print(f"{Fore.YELLOW}[WARNING] Cannot retrieve policy for bucket {bucket_name}: {e}{Style.RESET_ALL}")
@@ -212,6 +224,7 @@ def check_s3_bucket_policy(s3_client, bucket_name):
             'has_policy': "Unknown",
             'has_public_access': "Unknown",
             'has_secure_transport': "Unknown",
+            'has_wildcard_principal': "Unknown",  # Nowe pole
             'policy': None
         }
 
@@ -370,9 +383,25 @@ def calculate_security_score(bucket_info):
     total += 10
     
     # Check Object Lock (10 points)
-    if bucket_info['object_lock'] and bucket_info['object_lock']['object_lock_enabled'] is True:
-        score += 10
-    total += 10
+    if bucket_info['public_access'] and bucket_info['public_access']['is_public'] is not True:
+        score += 15
+    total += 15
+    
+    # Check ACL (5 points) - Nowe sprawdzenie
+    if bucket_info['acl'] and bucket_info['acl']['has_public_acl'] is not True:
+        score += 5
+    total += 5
+
+    if bucket_info['policy']:
+        policy_score = 15
+        if bucket_info['policy']['has_public_access'] is True:
+            policy_score -= 5
+        if bucket_info['policy']['has_wildcard_principal'] is True:
+            policy_score -= 5
+        if bucket_info['policy']['has_secure_transport'] is True:
+            policy_score += 5
+        score += max(0, policy_score)
+    total += 15
     
     # Calculate on scale 0-100
     if total > 0:
@@ -402,6 +431,7 @@ def analyze_s3_bucket(s3_client, bucket_name):
     bucket_info = {
         'name': bucket_name,
         'public_access': check_s3_bucket_public_access(s3_client, bucket_name),
+        'acl': check_s3_bucket_acl(s3_client, bucket_name), 
         'encryption': check_s3_bucket_encryption(s3_client, bucket_name),
         'versioning': check_s3_bucket_versioning(s3_client, bucket_name),
         'logging': check_s3_bucket_logging(s3_client, bucket_name),
@@ -430,7 +460,7 @@ def format_value(value, positive_state=True):
 
 def generate_summary_table(buckets_info):
     """Generate summary table for buckets"""
-    headers = ["Bucket", "Score", "Level", "Public", "Encryption", "Versioning", "Logging", "Policy", "Lifecycle"]
+    headers = ["Bucket", "Score", "Level", "Public", "Public ACL", "Wildcard Principal", "Encryption", "Versioning", "Logging", "Policy", "Lifecycle"]
     rows = []
     
     for bucket in buckets_info:
@@ -439,6 +469,8 @@ def generate_summary_table(buckets_info):
             f"{Fore.CYAN}{bucket['security_score']}/100{Style.RESET_ALL}",
             bucket['security_level'],
             format_value(bucket['public_access']['is_public'], False),
+            format_value(bucket['acl']['has_public_acl'], False),
+            format_value(bucket['policy']['has_wildcard_principal'], False),  # Nowa kolumna
             format_value(bucket['encryption']['is_encrypted']),
             format_value(bucket['versioning']['versioning_enabled']),
             format_value(bucket['logging']['logging_enabled']),
@@ -465,9 +497,13 @@ def generate_detailed_report(bucket_info):
         f"IgnorePublicAcls: {format_value(bucket_info['public_access']['ignore_public_acls'])}",
         f"RestrictPublicBuckets: {format_value(bucket_info['public_access']['restrict_public_buckets'])}",
         "",
-        f"{Fore.CYAN}2. ENCRYPTION{Style.RESET_ALL}",
-        f"Encryption enabled: {format_value(bucket_info['encryption']['is_encrypted'])}",
+        f"{Fore.CYAN}1.1. BUCKET ACL{Style.RESET_ALL}",
+        f"Public ACL grants: {format_value(bucket_info['acl']['has_public_acl'], False)}",
     ]
+    
+    if bucket_info['acl']['has_public_acl'] is True:
+        report.append(f"Public permissions: {', '.join(bucket_info['acl']['public_permissions'])}")
+  
     
     if bucket_info['encryption']['is_encrypted'] is True:
         report.extend([
@@ -501,6 +537,7 @@ def generate_detailed_report(bucket_info):
     if bucket_info['policy']['has_policy'] is True:
         report.extend([
             f"Contains public access: {format_value(bucket_info['policy']['has_public_access'], False)}",
+            f"Contains wildcard principal (*): {format_value(bucket_info['policy']['has_wildcard_principal'], False)}", 
             f"Requires secure transport: {format_value(bucket_info['policy']['has_secure_transport'])}"
         ])
     
@@ -602,6 +639,7 @@ def prepare_json_output(buckets_info):
             "policy": {
                 "has_policy": bucket["policy"]["has_policy"],
                 "has_public_access": bucket["policy"]["has_public_access"],
+                "has_wildcard_principal": bucket["policy"]["has_wildcard_principal"],  
                 "has_secure_transport": bucket["policy"]["has_secure_transport"]
             },
             "lifecycle": bucket["lifecycle"],
@@ -637,6 +675,7 @@ def prepare_json_output(buckets_info):
     no_logging = len([b for b in buckets_info if b['logging']['logging_enabled'] is not True])
     public_access = len([b for b in buckets_info if b['public_access']['is_public'] is True])
     no_lifecycle = len([b for b in buckets_info if b['lifecycle']['has_lifecycle'] is not True])
+    has_wildcard_principal = len([b for b in buckets_info if b['policy']['has_wildcard_principal'] is True]) 
     
     json_data["common_issues"] = {
         "no_encryption": {
@@ -658,6 +697,10 @@ def prepare_json_output(buckets_info):
         "no_lifecycle": {
             "count": no_lifecycle,
             "percentage": round(no_lifecycle/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+         "has_wildcard_principal": { 
+            "count": has_wildcard_principal,
+            "percentage": round(has_wildcard_principal/len(buckets_info)*100 if buckets_info else 0, 1)
         }
     }
     
@@ -683,6 +726,12 @@ def get_recommendations_for_bucket(bucket_info):
     if bucket_info['public_access']['is_public'] is True:
         recommendations.append("Enable block public access for the bucket")
     
+    if bucket_info['acl']['has_public_acl'] is True:
+        recommendations.append("Remove public access grants from bucket ACL")
+    
+    if bucket_info['policy']['has_policy'] is True and bucket_info['policy']['has_wildcard_principal'] is True:
+        recommendations.append("Remove wildcard principal (*) from bucket policy and use specific principals")
+
     if bucket_info['encryption']['is_encrypted'] is not True:
         recommendations.append("Enable default encryption")
     
@@ -707,6 +756,37 @@ def get_recommendations_for_bucket(bucket_info):
     
     return recommendations
 
+
+def check_s3_bucket_acl(s3_client, bucket_name):
+    """Check if bucket ACL grants permissions to Everyone"""
+    try:
+        acl = s3_client.get_bucket_acl(Bucket=bucket_name)
+        
+        # Check if any grant gives permission to Everyone
+        has_public_acl = False
+        public_permissions = []
+        
+        for grant in acl.get('Grants', []):
+            grantee = grant.get('Grantee', {})
+            permission = grant.get('Permission', '')
+            
+            # Check if grantee is the "Everyone" group (AllUsers)
+            if grantee.get('Type') == 'Group' and grantee.get('URI') == 'http://acs.amazonaws.com/groups/global/AllUsers':
+                has_public_acl = True
+                public_permissions.append(permission)
+            
+        return {
+            'has_public_acl': has_public_acl,
+            'public_permissions': public_permissions if has_public_acl else []
+        }
+    
+    except ClientError as e:
+        print(f"{Fore.YELLOW}[WARNING] Cannot check ACL for bucket {bucket_name}: {e}{Style.RESET_ALL}")
+        return {
+            'has_public_acl': "Unknown",
+            'public_permissions': []
+        }
+        
 def main():
     global VERBOSE
     
