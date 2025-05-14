@@ -47,6 +47,48 @@ def get_aws_account_id():
         print(f"{Fore.RED}[ERROR] Cannot retrieve AWS account ID: {e}{Style.RESET_ALL}")
         return "Unknown"
 
+
+def check_s3_bucket_public_access_status(bucket_info):
+    """
+    Determine if a bucket is truly publicly accessible based on multiple factors.
+    Returns a dict with information about the bucket's public accessibility.
+    """
+    # Initialize result with default values
+    result = {
+        'is_actually_public': False,
+        'public_access_reasons': [],
+        'public_access_possible': False,
+        'public_access_blocked': False
+    }
+    
+    # Check if Block Public Access is preventing public access
+    if bucket_info['public_access']['is_public'] is True:
+        result['public_access_possible'] = True
+        result['public_access_reasons'].append("Block Public Access settings are not fully enabled")
+    else:
+        result['public_access_blocked'] = True
+        result['public_access_reasons'].append("Block Public Access settings are preventing public access")
+        # If Block Public Access is fully enabled, the bucket cannot be public regardless of other settings
+        return result
+    
+    # Check ACL settings
+    if bucket_info['acl']['has_public_acl'] is True:
+        result['is_actually_public'] = True
+        permissions = ', '.join(bucket_info['acl']['public_permissions'])
+        result['public_access_reasons'].append(f"ACL grants public permissions: {permissions}")
+    
+    # Check bucket policy
+    if bucket_info['policy']['has_policy'] is True and bucket_info['policy']['has_public_access'] is True:
+        result['is_actually_public'] = True
+        result['public_access_reasons'].append("Bucket policy allows public access")
+    
+    # Check CORS configuration
+    # Note: CORS alone doesn't make a bucket public, but it's a supporting factor
+    if bucket_info['cors']['has_cors'] is True and bucket_info['cors']['has_wildcard_origin'] is True:
+        result['public_access_reasons'].append("CORS configuration allows requests from any origin (*)")
+    
+    return result
+
 def check_s3_bucket_public_access(s3_client, bucket_name):
     """Check if bucket has public access"""
     try:
@@ -439,6 +481,31 @@ def analyze_s3_bucket(s3_client, bucket_name):
         'lifecycle': check_s3_bucket_lifecycle(s3_client, bucket_name),
         'cors': check_s3_bucket_cors(s3_client, bucket_name),
         'object_lock': check_s3_bucket_object_lock(s3_client, bucket_name),
+        'empty': check_s3_bucket_empty(s3_client, bucket_name)
+    }
+    
+    # Add enhanced public access analysis
+    bucket_info['public_access_analysis'] = check_s3_bucket_public_access_status(bucket_info)
+    
+    # Calculate security score
+    bucket_info['security_score'] = calculate_security_score(bucket_info)
+    bucket_info['security_level'] = get_security_level(bucket_info['security_score'])
+    
+    return bucket_info
+    """Analyze S3 bucket for all security aspects"""
+    print_verbose(f"Analyzing bucket: {bucket_name}")
+    
+    bucket_info = {
+        'name': bucket_name,
+        'public_access': check_s3_bucket_public_access(s3_client, bucket_name),
+        'acl': check_s3_bucket_acl(s3_client, bucket_name), 
+        'encryption': check_s3_bucket_encryption(s3_client, bucket_name),
+        'versioning': check_s3_bucket_versioning(s3_client, bucket_name),
+        'logging': check_s3_bucket_logging(s3_client, bucket_name),
+        'policy': check_s3_bucket_policy(s3_client, bucket_name),
+        'lifecycle': check_s3_bucket_lifecycle(s3_client, bucket_name),
+        'cors': check_s3_bucket_cors(s3_client, bucket_name),
+        'object_lock': check_s3_bucket_object_lock(s3_client, bucket_name),
         'empty': check_s3_bucket_empty(s3_client, bucket_name)  
     }
     
@@ -461,6 +528,27 @@ def format_value(value, positive_state=True):
 
 def generate_summary_table(buckets_info):
     """Generate summary table for buckets"""
+    headers = ["Bucket", "Score", "Level", "Block Public", "Actually Public", "Public ACL", "Public Policy", "Encryption", "Versioning", "Logging", "Lifecycle", "Empty"]
+    rows = []
+    
+    for bucket in buckets_info:
+        rows.append([
+            bucket['name'],
+            f"{Fore.CYAN}{bucket['security_score']}/100{Style.RESET_ALL}",
+            bucket['security_level'],
+            format_value(not bucket['public_access']['is_public']),  # Invert for clarity - "Yes" means public access is blocked
+            format_value(bucket['public_access_analysis']['is_actually_public'], False),
+            format_value(bucket['acl']['has_public_acl'], False),
+            format_value(bucket['policy']['has_public_access'], False),
+            format_value(bucket['encryption']['is_encrypted']),
+            format_value(bucket['versioning']['versioning_enabled']),
+            format_value(bucket['logging']['logging_enabled']),
+            format_value(bucket['lifecycle']['has_lifecycle']),
+            format_value(bucket['empty']['is_empty'], False)
+        ])
+    
+    return tabulate(rows, headers=headers, tablefmt="pretty")
+    """Generate summary table for buckets"""
     headers = ["Bucket", "Score", "Level", "Public", "Public ACL", "Wildcard Principal", "Encryption", "Versioning", "Logging", "Policy", "Lifecycle", "Empty"]
     rows = []
     
@@ -482,35 +570,36 @@ def generate_summary_table(buckets_info):
     
     return tabulate(rows, headers=headers, tablefmt="pretty")
 
-
-    
-    
-    
-
 def generate_detailed_report(bucket_info):
     """Generate detailed report for bucket"""
     report = [
-            f"{Fore.CYAN}============================================={Style.RESET_ALL}",
-            f"{Fore.CYAN}     DETAILED SECURITY REPORT FOR BUCKET     {Style.RESET_ALL}",
-            f"{Fore.CYAN}============================================={Style.RESET_ALL}",
-            f"Bucket name: {Fore.BLUE}{bucket_info['name']}{Style.RESET_ALL}",
-            f"Security score: {Fore.CYAN}{bucket_info['security_score']}/100{Style.RESET_ALL}",
-            f"Security level: {bucket_info['security_level']}",
-            "",
-            f"{Fore.CYAN}1. PUBLIC ACCESS CONTROL{Style.RESET_ALL}",
-            f"Public access: {format_value(bucket_info['public_access']['is_public'], False)}",
-            f"BlockPublicAcls: {format_value(bucket_info['public_access']['block_public_acls'])}",
-            f"BlockPublicPolicy: {format_value(bucket_info['public_access']['block_public_policy'])}",
-            f"IgnorePublicAcls: {format_value(bucket_info['public_access']['ignore_public_acls'])}",
-            f"RestrictPublicBuckets: {format_value(bucket_info['public_access']['restrict_public_buckets'])}",
-            "",
-            f"{Fore.CYAN}1.1. BUCKET ACL{Style.RESET_ALL}",
-            f"Public ACL grants: {format_value(bucket_info['acl']['has_public_acl'], False)}",
-        ]
+        f"{Fore.CYAN}============================================={Style.RESET_ALL}",
+        f"{Fore.CYAN}     DETAILED SECURITY REPORT FOR BUCKET     {Style.RESET_ALL}",
+        f"{Fore.CYAN}============================================={Style.RESET_ALL}",
+        f"Bucket name: {Fore.BLUE}{bucket_info['name']}{Style.RESET_ALL}",
+        f"Security score: {Fore.CYAN}{bucket_info['security_score']}/100{Style.RESET_ALL}",
+        f"Security level: {bucket_info['security_level']}",
+        "",
+        f"{Fore.CYAN}1. PUBLIC ACCESS STATUS{Style.RESET_ALL}",
+        f"Block Public Access enabled: {format_value(not bucket_info['public_access']['is_public'])}",
+        f"Actually publicly accessible: {format_value(bucket_info['public_access_analysis']['is_actually_public'], False)}"
+    ]
+
+    if bucket_info['public_access_analysis']['public_access_reasons']:
+        report.append(f"\nPublic access status details:")
+        for reason in bucket_info['public_access_analysis']['public_access_reasons']:
+            report.append(f"  - {reason}")
+            
     report.extend([
         "",
-        f"{Fore.CYAN}2. BUCKET CONTENT{Style.RESET_ALL}",
-        f"Bucket is empty: {format_value(bucket_info['empty']['is_empty'], False)}"
+        f"{Fore.CYAN}1.1. BLOCK PUBLIC ACCESS SETTINGS{Style.RESET_ALL}",
+        f"BlockPublicAcls: {format_value(bucket_info['public_access']['block_public_acls'])}",
+        f"BlockPublicPolicy: {format_value(bucket_info['public_access']['block_public_policy'])}",
+        f"IgnorePublicAcls: {format_value(bucket_info['public_access']['ignore_public_acls'])}",
+        f"RestrictPublicBuckets: {format_value(bucket_info['public_access']['restrict_public_buckets'])}",
+        "",
+        f"{Fore.CYAN}1.2. BUCKET ACL{Style.RESET_ALL}",
+        f"Public ACL grants: {format_value(bucket_info['acl']['has_public_acl'], False)}",
     ])
     
     if bucket_info['empty']['is_empty'] is not True and bucket_info['empty']['is_empty'] != "Unknown":
@@ -653,6 +742,114 @@ def prepare_json_output(buckets_info):
             "security_score": bucket["security_score"],
             "security_level": get_security_level_plain(bucket["security_score"]),
             "public_access": bucket["public_access"],
+            "public_access_analysis": {
+                "is_actually_public": bucket["public_access_analysis"]["is_actually_public"],
+                "public_access_reasons": bucket["public_access_analysis"]["public_access_reasons"],
+                "public_access_possible": bucket["public_access_analysis"]["public_access_possible"],
+                "public_access_blocked": bucket["public_access_analysis"]["public_access_blocked"]
+            },
+            "encryption": bucket["encryption"],
+            "versioning": bucket["versioning"],
+            "logging": bucket["logging"],
+            "policy": {
+                "has_policy": bucket["policy"]["has_policy"],
+                "has_public_access": bucket["policy"]["has_public_access"],
+                "has_wildcard_principal": bucket["policy"]["has_wildcard_principal"],
+                "has_secure_transport": bucket["policy"]["has_secure_transport"]
+            },
+            "lifecycle": bucket["lifecycle"],
+            "cors": bucket["cors"],
+            "object_lock": bucket["object_lock"],
+            "empty": bucket["empty"],
+            "recommendations": get_recommendations_for_bucket(bucket)
+        }
+        
+        json_data["buckets"].append(bucket_data)
+    
+    # Add overall statistics
+    total_score = sum(b['security_score'] for b in buckets_info)
+    avg_score = total_score / len(buckets_info) if buckets_info else 0
+    
+    secure_count = len([b for b in buckets_info if b['security_score'] >= 75])
+    moderate_count = len([b for b in buckets_info if 60 <= b['security_score'] < 75])
+    critical_count = len([b for b in buckets_info if b['security_score'] < 60])
+    empty_buckets = len([b for b in buckets_info if b['empty']['is_empty'] is True])
+    actually_public = len([b for b in buckets_info if b['public_access_analysis']['is_actually_public'] is True])
+    
+    json_data["statistics"] = {
+        "total_buckets": len(buckets_info),
+        "average_score": round(avg_score, 1),
+        "secure_buckets": secure_count,
+        "moderate_buckets": moderate_count,
+        "critical_buckets": critical_count,
+        "empty_buckets": empty_buckets,
+        "actually_public_buckets": actually_public,
+        "secure_percentage": round(secure_count/len(buckets_info)*100 if buckets_info else 0, 1),
+        "moderate_percentage": round(moderate_count/len(buckets_info)*100 if buckets_info else 0, 1),
+        "critical_percentage": round(critical_count/len(buckets_info)*100 if buckets_info else 0, 1),
+        "empty_percentage": round(empty_buckets/len(buckets_info)*100 if buckets_info else 0, 1),
+        "actually_public_percentage": round(actually_public/len(buckets_info)*100 if buckets_info else 0, 1)
+    }
+    
+    # Add common issues
+    no_encryption = len([b for b in buckets_info if b['encryption']['is_encrypted'] is not True])
+    no_versioning = len([b for b in buckets_info if b['versioning']['versioning_enabled'] is not True])
+    no_logging = len([b for b in buckets_info if b['logging']['logging_enabled'] is not True])
+    bpa_not_enabled = len([b for b in buckets_info if b['public_access']['is_public'] is True])
+    actually_public = len([b for b in buckets_info if b['public_access_analysis']['is_actually_public'] is True])
+    no_lifecycle = len([b for b in buckets_info if b['lifecycle']['has_lifecycle'] is not True])
+    has_wildcard_principal = len([b for b in buckets_info if b['policy']['has_wildcard_principal'] is True])
+    
+    json_data["common_issues"] = {
+        "no_encryption": {
+            "count": no_encryption,
+            "percentage": round(no_encryption/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "no_versioning": {
+            "count": no_versioning,
+            "percentage": round(no_versioning/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "no_logging": {
+            "count": no_logging,
+            "percentage": round(no_logging/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "block_public_access_not_enabled": {
+            "count": bpa_not_enabled,
+            "percentage": round(bpa_not_enabled/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "actually_public": {
+            "count": actually_public,
+            "percentage": round(actually_public/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "no_lifecycle": {
+            "count": no_lifecycle,
+            "percentage": round(no_lifecycle/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "has_wildcard_principal": { 
+            "count": has_wildcard_principal,
+            "percentage": round(has_wildcard_principal/len(buckets_info)*100 if buckets_info else 0, 1)
+        },
+        "empty_buckets": {
+            "count": empty_buckets,
+            "percentage": round(empty_buckets/len(buckets_info)*100 if buckets_info else 0, 1)
+        }
+    }
+    
+    return json_data
+    """Prepare data for JSON export without colorama formatting"""
+    json_data = {
+        "report_date": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "aws_account_id": get_aws_account_id(),
+        "buckets": []
+    }
+    
+    for bucket in buckets_info:
+        # Create a copy of the bucket info
+        bucket_data = {
+            "name": bucket["name"],
+            "security_score": bucket["security_score"],
+            "security_level": get_security_level_plain(bucket["security_score"]),
+            "public_access": bucket["public_access"],
             "encryption": bucket["encryption"],
             "versioning": bucket["versioning"],
             "logging": bucket["logging"],
@@ -748,6 +945,50 @@ def get_security_level_plain(score):
         return "Critical"
 
 def get_recommendations_for_bucket(bucket_info):
+    """Get enhanced recommendations for a bucket"""
+    recommendations = []
+    
+    # Check for actual public access first
+    if bucket_info['public_access_analysis']['is_actually_public'] is True:
+        recommendations.append("CRITICAL: Bucket is currently publicly accessible - implement immediate access restrictions")
+    
+    # Then recommend enabling Block Public Access if not enabled
+    if bucket_info['public_access']['is_public'] is True:
+        recommendations.append("Enable block public access for the bucket to prevent any possibility of public access")
+    
+    # Continue with other recommendations...
+    if bucket_info['acl']['has_public_acl'] is True:
+        recommendations.append("Remove public access grants from bucket ACL")
+    
+    if bucket_info['policy']['has_policy'] is True and bucket_info['policy']['has_wildcard_principal'] is True:
+        recommendations.append("Remove wildcard principal (*) from bucket policy and use specific principals")
+
+    if bucket_info['encryption']['is_encrypted'] is not True:
+        recommendations.append("Enable default encryption")
+    
+    if bucket_info['versioning']['versioning_enabled'] is not True:
+        recommendations.append("Enable object versioning")
+    
+    if bucket_info['logging']['logging_enabled'] is not True:
+        recommendations.append("Enable access logging")
+    
+    if bucket_info['policy']['has_policy'] is not True:
+        recommendations.append("Define a bucket policy with secure transport requirement")
+    elif bucket_info['policy']['has_public_access'] is True:
+        recommendations.append("Remove public access from bucket policy")
+    elif bucket_info['policy']['has_secure_transport'] is not True:
+        recommendations.append("Add secure transport requirement to bucket policy")
+    
+    if bucket_info['lifecycle']['has_lifecycle'] is not True:
+        recommendations.append("Define object lifecycle policy")
+    
+    if bucket_info['cors']['has_cors'] is True and bucket_info['cors']['has_wildcard_origin'] is True:
+        recommendations.append("Restrict wildcard origin (*) in CORS configuration")
+    
+    if bucket_info['empty']['is_empty'] is True:
+        recommendations.append("Consider removing the empty bucket if it's not needed")
+    
+    return recommendations
     """Get recommendations for a bucket"""
     recommendations = []
     
@@ -904,7 +1145,17 @@ def main():
         
         # Generate statistics
         empty_count = len([b for b in buckets_info if b['empty']['is_empty'] is True])
+        actual_public_count = len([b for b in buckets_info if b['public_access_analysis']['is_actually_public'] is True])
+        bpa_disabled_count = len([b for b in buckets_info if b['public_access']['is_public'] is True])
+        
+        print(f"{Fore.CYAN}========================================================{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}                  OVERALL STATISTICS                    {Style.RESET_ALL}")
+        print(f"{Fore.CYAN}========================================================{Style.RESET_ALL}")
+        print(f"Total number of buckets: {len(buckets_info)}")
+        print(f"Actually public buckets: {Fore.RED if actual_public_count > 0 else Fore.GREEN}{actual_public_count}{Style.RESET_ALL} ({round(actual_public_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)")
+        print(f"Buckets without Block Public Access: {Fore.YELLOW}{bpa_disabled_count}{Style.RESET_ALL} ({round(bpa_disabled_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)")
         print(f"Empty buckets: {Fore.CYAN}{empty_count}{Style.RESET_ALL} ({round(empty_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)")
+        
         total_score = sum(b['security_score'] for b in buckets_info)
         avg_score = total_score / len(buckets_info) if buckets_info else 0
         
@@ -912,10 +1163,6 @@ def main():
         moderate_count = len([b for b in buckets_info if 60 <= b['security_score'] < 75])
         critical_count = len([b for b in buckets_info if b['security_score'] < 60])
         
-        print(f"{Fore.CYAN}========================================================{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}                  OVERALL STATISTICS                    {Style.RESET_ALL}")
-        print(f"{Fore.CYAN}========================================================{Style.RESET_ALL}")
-        print(f"Total number of buckets: {len(buckets_info)}")
         print(f"Average security score: {Fore.CYAN}{round(avg_score, 1)}/100{Style.RESET_ALL}")
         print(f"Secure buckets (75-100): {Fore.GREEN}{secure_count}{Style.RESET_ALL} ({round(secure_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)")
         print(f"Moderately secure buckets (60-74): {Fore.YELLOW}{moderate_count}{Style.RESET_ALL} ({round(moderate_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)")
@@ -930,16 +1177,20 @@ def main():
         no_encryption = len([b for b in buckets_info if b['encryption']['is_encrypted'] is not True])
         no_versioning = len([b for b in buckets_info if b['versioning']['versioning_enabled'] is not True])
         no_logging = len([b for b in buckets_info if b['logging']['logging_enabled'] is not True])
-        public_access = len([b for b in buckets_info if b['public_access']['is_public'] is True])
+        actually_public = len([b for b in buckets_info if b['public_access_analysis']['is_actually_public'] is True])
         no_lifecycle = len([b for b in buckets_info if b['lifecycle']['has_lifecycle'] is not True])
         empty_buckets = len([b for b in buckets_info if b['empty']['is_empty'] is True])
+        has_wildcard_principal = len([b for b in buckets_info if b['policy']['has_wildcard_principal'] is True])
+        has_cors_wildcard = len([b for b in buckets_info if b['cors']['has_cors'] is True and b['cors']['has_wildcard_origin'] is True])
 
         problems = [
+            ("Actually public buckets", actually_public),
             ("No encryption", no_encryption),
             ("No versioning", no_versioning),
             ("No logging", no_logging),
-            ("Public access", public_access),
             ("No lifecycle policy", no_lifecycle),
+            ("Has wildcard principal in policy", has_wildcard_principal),
+            ("Has CORS wildcard origin", has_cors_wildcard),
             ("Empty buckets", empty_buckets)
         ]
         
@@ -948,7 +1199,11 @@ def main():
         
         for problem, count in problems:
             percentage = round(count/len(buckets_info)*100 if buckets_info else 0, 1)
-            color = Fore.RED if percentage > 50 else (Fore.YELLOW if percentage > 25 else Fore.GREEN)
+            if problem == "Actually public buckets" and count > 0:
+                # Always use red for actually public buckets if they exist
+                color = Fore.RED
+            else:
+                color = Fore.RED if percentage > 50 else (Fore.YELLOW if percentage > 25 else Fore.GREEN)
             print(f"{problem}: {color}{count}/{len(buckets_info)} ({percentage}%){Style.RESET_ALL}")
         
         # Save results to text file
@@ -965,18 +1220,15 @@ def main():
                 f.write("=" * 50 + "\n")
                 # Save table without colors
                 table_data = []
-                table_headers = ["Bucket", "Score", "Level", "Public", "Encryption", "Versioning", "Logging", "Policy", "Lifecycle"]
+                table_headers = ["Bucket", "Score", "Level", "Block Public", "Actually Public", "Encryption", "Versioning", "Logging", "Policy", "Lifecycle"]
                 
                 for bucket in buckets_info:
                     table_data.append([
                         bucket['name'],
                         f"{bucket['security_score']}/100",
-                        "Very Good" if bucket['security_score'] >= 90 else
-                        "Good" if bucket['security_score'] >= 75 else
-                        "Moderate" if bucket['security_score'] >= 60 else
-                        "Poor" if bucket['security_score'] >= 40 else
-                        "Critical",
-                        "Yes" if bucket['public_access']['is_public'] is True else "No",
+                        get_security_level_plain(bucket['security_score']),
+                        "No" if bucket['public_access']['is_public'] is True else "Yes",
+                        "Yes" if bucket['public_access_analysis']['is_actually_public'] is True else "No",
                         "Yes" if bucket['encryption']['is_encrypted'] is True else "No",
                         "Yes" if bucket['versioning']['versioning_enabled'] is True else "No",
                         "Yes" if bucket['logging']['logging_enabled'] is True else "No",
@@ -989,6 +1241,7 @@ def main():
                 f.write("OVERALL STATISTICS\n")
                 f.write("=" * 50 + "\n")
                 f.write(f"Total number of buckets: {len(buckets_info)}\n")
+                f.write(f"Actually public buckets: {actual_public_count} ({round(actual_public_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)\n")
                 f.write(f"Average security score: {round(avg_score, 1)}/100\n")
                 f.write(f"Secure buckets (75-100): {secure_count} ({round(secure_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)\n")
                 f.write(f"Moderately secure buckets (60-74): {moderate_count} ({round(moderate_count/len(buckets_info)*100 if buckets_info else 0, 1)}%)\n")
@@ -1000,6 +1253,7 @@ def main():
                     percentage = round(count/len(buckets_info)*100 if buckets_info else 0, 1)
                     f.write(f"{problem}: {count}/{len(buckets_info)} ({percentage}%)\n")
                 
+
                 f.write("\n\nDETAILED REPORTS FOR CRITICAL BUCKETS\n")
                 f.write("=" * 50 + "\n\n")
                 
